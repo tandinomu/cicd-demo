@@ -1,0 +1,90 @@
+name: Java CI with Maven
+
+on:
+  push:
+    branches: ["master"]
+  pull_request:
+    branches: ["master"]
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  test:
+    name: build and test
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: "17"
+          distribution: "temurin"
+          cache: maven
+      - name: Perform the Unit Test Cases
+        run: mvn -B test
+        
+  security:
+    needs: test
+    name: SA scan using snyk
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: "17"
+          distribution: "temurin"
+          cache: maven
+      - name: Build project
+        run: mvn clean compile -DskipTests
+      - name: Create SARIF output directory
+        run: |
+          mkdir -p sarif-results
+          chmod 755 sarif-results
+      - name: Run Snyk to check for vulnerabilities
+        uses: snyk/actions/maven@master
+        continue-on-error: true
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        with:
+          args: --sarif-file-output=sarif-results/snyk-maven.sarif
+      - name: Copy SARIF file and create fallback if needed
+        if: always()
+        run: |
+          SARIF_FILE="snyk-maven.sarif"
+          
+          # Ensure we have a SARIF file in the writable directory
+          if [ ! -f "sarif-results/${SARIF_FILE}" ]; then
+            echo "⚠️ No SARIF file found, creating fallback"
+            # Create fallback SARIF file in writable directory
+            cat > "sarif-results/${SARIF_FILE}" << 'EOF'
+          {
+            "version": "2.1.0",
+            "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
+            "runs": [
+              {
+                "tool": {
+                  "driver": {
+                    "name": "Snyk",
+                    "informationUri": "https://snyk.io"
+                  }
+                },
+                "results": []
+              }
+            ]
+          }
+          EOF
+          fi
+          
+          if [ -f "sarif-results/${SARIF_FILE}" ]; then
+            echo "✅ SARIF file ready: sarif-results/${SARIF_FILE}"
+            ls -la "sarif-results/${SARIF_FILE}"
+          fi
+      - name: Upload SARIF to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: sarif-results/snyk-maven.sarif

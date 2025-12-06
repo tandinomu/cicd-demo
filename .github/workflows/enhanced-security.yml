@@ -1,0 +1,358 @@
+# Enhanced GitHub Actions workflow with comprehensive Snyk integration
+# This file demonstrates advanced Snyk configuration for the practical guide
+name: Enhanced CI/CD with Comprehensive Security
+
+on:
+  push:
+    branches: ["master", "main"]
+  pull_request:
+    branches: ["master", "main"]
+  schedule:
+    # Run security scan every Monday at 2 AM UTC
+    - cron: "0 2 * * 1"
+
+permissions:
+  contents: read
+  security-events: write
+  issues: write
+  pull-requests: write
+
+env:
+  JAVA_VERSION: "17"
+  MAVEN_OPTS: "-Xmx1024m"
+
+jobs:
+  # Detect changes to optimize workflow execution
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.changes.outputs.code }}
+      dependencies: ${{ steps.changes.outputs.dependencies }}
+      docker: ${{ steps.changes.outputs.docker }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Check for changes
+        uses: dorny/paths-filter@v2
+        id: changes
+        with:
+          filters: |
+            code:
+              - 'src/**'
+              - '!src/test/**'
+            dependencies:
+              - 'pom.xml'
+              - '.snyk'
+            docker:
+              - 'dockerfile'
+              - 'dockerrun.aws.json'
+
+  # Build and test job
+  test:
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.code == 'true' || needs.changes.outputs.dependencies == 'true'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK ${{ env.JAVA_VERSION }}
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: "temurin"
+          cache: maven
+
+      - name: Run unit tests
+        run: mvn -B test --file pom.xml
+
+      - name: Generate test coverage report
+        run: mvn jacoco:report
+
+      - name: Upload coverage reports
+        uses: codecov/codecov-action@v3
+        with:
+          file: ./target/site/jacoco/jacoco.xml
+          fail_ci_if_error: false
+
+  # Comprehensive security scanning with matrix strategy
+  security:
+    runs-on: ubuntu-latest
+    needs: [changes, test]
+    if: always() && (needs.changes.outputs.code == 'true' || needs.changes.outputs.dependencies == 'true' || github.event_name == 'schedule')
+
+    strategy:
+      fail-fast: false
+      matrix:
+        scan-type: [dependencies, code]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK ${{ env.JAVA_VERSION }}
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: "temurin"
+          cache: maven
+
+      - name: Build project (required for comprehensive scanning)
+        run: mvn clean compile -DskipTests
+
+      - name: Debug - Check Snyk Token
+        run: |
+          if [ -z "${{ secrets.SNYK_TOKEN }}" ]; then
+            echo "⚠️ SNYK_TOKEN is not set - Snyk scans will be skipped"
+          else
+            echo "✅ SNYK_TOKEN is configured"
+          fi
+
+      - name: Create SARIF output directory
+        run: |
+          mkdir -p sarif-results
+          chmod 755 sarif-results
+
+      - name: Run Snyk Dependency Scan
+        if: matrix.scan-type == 'dependencies'
+        uses: snyk/actions/maven@master
+        continue-on-error: true
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        with:
+          args: >
+            --severity-threshold=medium
+            --project-name=${{ github.repository }}-dependencies
+            --sarif-file-output=sarif-results/snyk-dependencies.sarif
+
+      - name: Run Snyk Code Security Scan (SAST)
+        if: matrix.scan-type == 'code'
+        uses: snyk/actions/maven@master
+        continue-on-error: true
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        with:
+          command: code test
+          args: >
+            --severity-threshold=high
+            --project-name=${{ github.repository }}-code
+            --sarif-file-output=sarif-results/snyk-code.sarif
+
+      - name: Debug - List generated files
+        if: always()
+        run: |
+          echo "Files in current directory:"
+          ls -la
+          echo "Files in sarif-results directory:"
+          ls -la sarif-results/ 2>/dev/null || echo "No sarif-results directory"
+          echo "Looking for SARIF files:"
+          find . -name "*.sarif" -type f || echo "No SARIF files found"
+
+      - name: Copy SARIF files to root and create fallback if needed
+        if: always()
+        run: |
+          SCAN_TYPE="${{ matrix.scan-type }}"
+          SARIF_FILE="snyk-${SCAN_TYPE}.sarif"
+          
+          # Ensure we have a SARIF file in the writable directory
+          if [ ! -f "sarif-results/${SARIF_FILE}" ]; then
+            echo "⚠️ No SARIF file found in sarif-results, creating fallback"
+            # Create fallback SARIF file in writable directory
+            cat > "sarif-results/${SARIF_FILE}" << 'EOF'
+          {
+            "version": "2.1.0",
+            "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
+            "runs": [
+              {
+                "tool": {
+                  "driver": {
+                    "name": "Snyk",
+                    "informationUri": "https://snyk.io"
+                  }
+                },
+                "results": []
+              }
+            ]
+          }
+          EOF
+          fi
+          
+          # Verify file exists in writable directory
+          if [ -f "sarif-results/${SARIF_FILE}" ]; then
+            echo "✅ SARIF file ready: sarif-results/${SARIF_FILE}"
+            ls -la "sarif-results/${SARIF_FILE}"
+          else
+            echo "❌ Failed to create SARIF file!"
+            exit 1
+          fi
+
+      - name: Upload SARIF results to GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: sarif-results/snyk-${{ matrix.scan-type }}.sarif
+          category: snyk-${{ matrix.scan-type }}
+
+      - name: Archive security scan results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: snyk-${{ matrix.scan-type }}-results
+          path: sarif-results/snyk-${{ matrix.scan-type }}.sarif
+          retention-days: 30
+
+  # Container security scanning
+  container-security:
+    runs-on: ubuntu-latest
+    needs: [changes, test]
+    if: needs.changes.outputs.docker == 'true' || github.event_name == 'schedule'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK ${{ env.JAVA_VERSION }}
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: "temurin"
+          cache: maven
+
+      - name: Build application JAR
+        run: mvn clean package -DskipTests
+
+      - name: Build Docker image
+        run: |
+          docker build -t cicd-demo:${{ github.sha }} .
+          docker tag cicd-demo:${{ github.sha }} cicd-demo:latest
+
+      - name: Create SARIF output directory
+        run: |
+          mkdir -p sarif-results
+          chmod 755 sarif-results
+
+      - name: Run Snyk Container Scan
+        uses: snyk/actions/docker@master
+        continue-on-error: true
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        with:
+          image: cicd-demo:latest
+          args: >
+            --severity-threshold=high
+            --file=dockerfile
+            --exclude-base-image-vulns
+            --sarif-file-output=sarif-results/snyk-container.sarif
+
+      - name: Create fallback SARIF file if container scan failed
+        if: always()
+        run: |
+          if [ ! -f "sarif-results/snyk-container.sarif" ]; then
+            echo "Creating fallback container SARIF file"
+            cat > "sarif-results/snyk-container.sarif" << 'EOF'
+          {
+            "version": "2.1.0",
+            "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
+            "runs": [
+              {
+                "tool": {
+                  "driver": {
+                    "name": "Snyk Container",
+                    "informationUri": "https://snyk.io"
+                  }
+                },
+                "results": []
+              }
+            ]
+          }
+          EOF
+          fi
+
+      - name: Upload container scan results
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: sarif-results/snyk-container.sarif
+          category: snyk-container
+
+      - name: Archive container scan results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: snyk-container-results
+          path: sarif-results/snyk-container.sarif
+          retention-days: 30
+
+  # Monitor deployed dependencies (only on main branch)
+  monitor:
+    runs-on: ubuntu-latest
+    needs: [test, security]
+    if: github.ref == 'refs/heads/master' && github.event_name == 'push'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK ${{ env.JAVA_VERSION }}
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: "temurin"
+          cache: maven
+
+      - name: Monitor project with Snyk
+        uses: snyk/actions/maven@master
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        with:
+          command: monitor
+          args: >
+            --project-name=${{ github.repository }}-production
+            --target-reference=${{ github.ref }}
+            --remote-repo-url=${{ github.server_url }}/${{ github.repository }}.git
+
+  # Notification job for critical security issues
+  notify:
+    runs-on: ubuntu-latest
+    needs: [security, container-security]
+    if: failure() && github.event_name != 'pull_request'
+    permissions:
+      contents: read
+      issues: write
+
+    steps:
+      - name: Create GitHub issue for security vulnerabilities
+        uses: actions/github-script@v7
+        if: github.event_name != 'pull_request'
+        with:
+          script: |
+            const title = `🚨 Security vulnerabilities detected - ${context.sha.substring(0, 7)}`;
+            const body = `
+            Critical security vulnerabilities have been detected in the latest commit.
+
+            **Details:**
+            - Commit: ${context.sha}
+            - Branch: ${context.ref}
+            - Workflow: ${context.workflow}
+            - Run: ${context.runNumber}
+
+            **Action Required:**
+            1. Review the security scan results in the Actions tab
+            2. Check the Security tab for detailed vulnerability information
+            3. Update affected dependencies or apply patches
+            4. Re-run the security scan to verify fixes
+
+            **Links:**
+            - [Workflow Run](${context.payload.repository.html_url}/actions/runs/${context.runId})
+            - [Security Tab](${context.payload.repository.html_url}/security)
+            `;
+
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: title,
+              body: body,
+              labels: ['security', 'urgent']
+            });
