@@ -1,12 +1,5 @@
 # CI/CD Demo with Snyk Security Scanning
 
-![Java](https://img.shields.io/badge/Java-17-red?style=flat-square&logo=openjdk)
-![Spring Boot](https://img.shields.io/badge/Spring%20Boot-3.4.9-brightgreen?style=flat-square&logo=spring-boot)
-![Maven](https://img.shields.io/badge/Maven-3.8+-blue?style=flat-square&logo=apache-maven)
-![GitHub Actions](https://img.shields.io/badge/CI%2FCD-GitHub%20Actions-2088FF?style=flat-square&logo=github-actions)
-![Snyk](https://img.shields.io/badge/Security-Snyk-4C2B5E?style=flat-square&logo=snyk)
-<img src="https://raw.githubusercontent.com/gauravpatil97886/gauravpatil97886/main/gaurav_gif/Line.gif" alt="Animated Line" />
-
 A comprehensive CI/CD demonstration project showcasing **Static Application Security Testing (SAST)** integration with **Snyk** in GitHub Actions. This project implements automated security scanning, vulnerability management, and continuous monitoring as part of a modern DevSecOps pipeline.
 
 ## 🎯 Project Overview
